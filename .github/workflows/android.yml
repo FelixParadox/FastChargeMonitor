@@ -37,6 +37,32 @@ jobs:
           unzip -q FastChargeMonitor-Redmi-9A.zip -d source
           test -f source/FastChargeMonitor/app/build.gradle
 
+      - name: Align Java and Kotlin JVM targets
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('source/FastChargeMonitor/app/build.gradle')
+          s = p.read_text()
+          if 'sourceCompatibility JavaVersion.VERSION_17' not in s:
+              pos = s.rfind('\n}')
+              if pos < 0:
+                  raise SystemExit('Tidak menemukan penutup blok android di app/build.gradle')
+              config = '''
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+              '''
+              s = s[:pos] + config + s[pos:]
+              p.write_text(s)
+          print(p.read_text())
+          PY
+
       - name: Build debug APK
         working-directory: source/FastChargeMonitor
         run: gradle --no-daemon assembleDebug
