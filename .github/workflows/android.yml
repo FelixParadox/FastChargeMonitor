@@ -1,4 +1,3 @@
-
 name: Build FastCharge Monitor APK
 
 on:
@@ -29,14 +28,14 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK packages
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'platform-tools'
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
 
       - name: Extract project ZIP
         run: |
           test -f FastChargeMonitor-Redmi-9A.zip
           unzip -q FastChargeMonitor-Redmi-9A.zip -d source
+          test -f source/FastChargeMonitor/app/build.gradle
 
       - name: Build debug APK
         working-directory: source/FastChargeMonitor
