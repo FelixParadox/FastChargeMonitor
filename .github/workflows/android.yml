@@ -1,4 +1,4 @@
-name: Build FastCharge Monitor APKs
+name: Build FastCharge Monitor APK
 
 on:
   workflow_dispatch:
