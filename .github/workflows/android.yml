@@ -33,15 +33,15 @@ jobs:
 
       - name: Extract project ZIP
         run: |
-          test -f FastChargeMonitor-Redmi-9A.zip
-          unzip -q FastChargeMonitor-Redmi-9A.zip -d source
-          test -f source/FastChargeMonitor/app/build.gradle
+          test -f FastChargePro.zip
+          unzip -q FastChargePro.zip -d source
+          test -f source/FastChargePro/app/build.gradle
 
       - name: Align Java and Kotlin JVM targets
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('source/FastChargeMonitor/app/build.gradle')
+          p = Path('source/FastChargePro/app/build.gradle')
           s = p.read_text()
           if 'sourceCompatibility JavaVersion.VERSION_17' not in s:
               pos = s.rfind('\n}')
@@ -64,13 +64,13 @@ jobs:
           PY
 
       - name: Build debug APK
-        working-directory: source/FastChargeMonitor
+        working-directory: source/FastChargePro
         run: gradle --no-daemon assembleDebug
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FastChargeMonitor-debug-apk
-          path: source/FastChargeMonitor/app/build/outputs/apk/debug/app-debug.apk
+          name: felix-apk
+          path: source/FastChargePro/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
