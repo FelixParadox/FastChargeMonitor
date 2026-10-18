@@ -1,7 +1,6 @@
 name: Build APK & Register Device Serial
 
 on:
-  # Trigger build manual / push
   workflow_dispatch:
     inputs:
       device_serial:
@@ -10,12 +9,11 @@ on:
         type: string
   push:
     branches: [ main, master ]
-  # Terima serial dari aplikasi HP
   repository_dispatch:
     types: [ register_device ]
 
 permissions:
-  contents: write   # wajib untuk update file daftar seri & release
+  contents: write
 
 jobs:
   build-and-register:
@@ -65,6 +63,7 @@ jobs:
           if [ -f "app/build.gradle" ]; then
             echo "✅ Mode: source langsung di repo"
             echo "PROJECT_DIR=$PWD" >> $GITHUB_OUTPUT
+            echo "SOURCE_MODE=direct" >> $GITHUB_OUTPUT
             exit 0
           fi
           if [ -f "FastChargePro.zip" ]; then
@@ -75,6 +74,7 @@ jobs:
               echo "❌ settings.gradle tidak ditemukan di dalam zip"; exit 1
             fi
             echo "PROJECT_DIR=$PWD/$ROOT_DIR" >> $GITHUB_OUTPUT
+            echo "SOURCE_MODE=zip" >> $GITHUB_OUTPUT
             ls -la "$ROOT_DIR"
             exit 0
           fi
@@ -82,7 +82,75 @@ jobs:
           ls -la; exit 1
 
       # ─────────────────────────────────────────────
-      # 6. Align Java 17 (compileOptions & kotlinOptions)
+      # 6. AUTO-DETECT KEYSTORE
+      #    Prioritas:
+      #      1. Secret KEYSTORE_BASE64 (kalau di-set)
+      #      2. File .jks di PROJECT_DIR/keystore/
+      #      3. File .jks di PROJECT_DIR (root project)
+      #      4. File .jks di root repo
+      #    Kalau tidak ada sama sekali → set HAS_KEYSTORE=false
+      # ─────────────────────────────────────────────
+      - name: Auto-detect keystore
+        id: keystore
+        env:
+          PROJECT_DIR: ${{ steps.detect.outputs.PROJECT_DIR }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          set +e
+          echo "=== Cek keberadaan keystore ==="
+
+          # Prioritas 1: secret KEYSTORE_BASE64
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "🔑 Mode: dari secret KEYSTORE_BASE64"
+            mkdir -p keystore
+            echo "$KEYSTORE_BASE64" | base64 -d > keystore/myx.jks
+            KEYSTORE_PATH="$GITHUB_WORKSPACE/keystore/myx.jks"
+            if [ -f "$KEYSTORE_PATH" ] && [ -s "$KEYSTORE_PATH" ]; then
+              echo "✅ Keystore dari secret berhasil di-decode"
+              echo "HAS_KEYSTORE=true" >> $GITHUB_OUTPUT
+              echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> $GITHUB_OUTPUT
+              ls -la keystore/
+              exit 0
+            else
+              echo "⚠️ Secret tidak valid, lanjut cek file lokal..."
+            fi
+          fi
+
+          # Prioritas 2: file .jks di PROJECT_DIR/keystore/
+          KEYSTORE_PATH=$(find "$PROJECT_DIR/keystore" -maxdepth 1 -name "*.jks" -type f 2>/dev/null | head -n1)
+          if [ -n "$KEYSTORE_PATH" ] && [ -f "$KEYSTORE_PATH" ]; then
+            echo "🔑 Mode: file .jks di $PROJECT_DIR/keystore/"
+            echo "HAS_KEYSTORE=true" >> $GITHUB_OUTPUT
+            echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> $GITHUB_OUTPUT
+            ls -la "$(dirname "$KEYSTORE_PATH")"
+            exit 0
+          fi
+
+          # Prioritas 3: file .jks di PROJECT_DIR (root)
+          KEYSTORE_PATH=$(find "$PROJECT_DIR" -maxdepth 1 -name "*.jks" -type f 2>/dev/null | head -n1)
+          if [ -n "$KEYSTORE_PATH" ] && [ -f "$KEYSTORE_PATH" ]; then
+            echo "🔑 Mode: file .jks di root project"
+            echo "HAS_KEYSTORE=true" >> $GITHUB_OUTPUT
+            echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Prioritas 4: file .jks di root repo (GITHUB_WORKSPACE)
+          KEYSTORE_PATH=$(find "$GITHUB_WORKSPACE" -maxdepth 2 -name "*.jks" -type f 2>/dev/null | head -n1)
+          if [ -n "$KEYSTORE_PATH" ] && [ -f "$KEYSTORE_PATH" ]; then
+            echo "🔑 Mode: file .jks di root repo"
+            echo "HAS_KEYSTORE=true" >> $GITHUB_OUTPUT
+            echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Tidak ditemukan sama sekali
+          echo "⚠️ Tidak ada keystore (.jks) ditemukan. Build release akan di-skip."
+          echo "HAS_KEYSTORE=false" >> $GITHUB_OUTPUT
+          exit 0
+
+      # ─────────────────────────────────────────────
+      # 7. Align Java 17 (compileOptions & kotlinOptions)
       # ─────────────────────────────────────────────
       - name: Align Java and Kotlin JVM targets
         env:
@@ -112,17 +180,49 @@ jobs:
           PY
 
       # ─────────────────────────────────────────────
-      # 7. Siapkan keystore (decode dari secret)
+      # 8. Patch build.gradle supaya baca env KEYSTORE_FILE
+      #    (hanya dijalankan kalau keystore ditemukan)
       # ─────────────────────────────────────────────
-      - name: Prepare keystore
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
+      - name: Patch build.gradle for keystore
+        if: ${{ steps.keystore.outputs.HAS_KEYSTORE == 'true' }}
+        env:
+          PROJECT_DIR: ${{ steps.detect.outputs.PROJECT_DIR }}
         run: |
-          mkdir -p keystore
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > keystore/myx.jks
-          ls -la keystore/
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          proj = Path(os.environ["PROJECT_DIR"]) / "app" / "build.gradle"
+          s = proj.read_text()
+
+          # Kalau sudah pakai env KEYSTORE_FILE, skip
+          if "System.getenv(\"KEYSTORE_FILE\")" in s or "System.getenv('KEYSTORE_FILE')" in s:
+              print("✅ build.gradle sudah pakai env KEYSTORE_FILE")
+              raise SystemExit(0)
+
+          # Ganti blok signingConfigs release agar pakai env
+          pattern = re.compile(
+              r'signingConfigs\s*\{.*?release\s*\{.*?\}\s*\}',
+              re.DOTALL
+          )
+          new_block = '''signingConfigs {
+              release {
+                  def keystorePath = System.getenv("KEYSTORE_FILE") ?: "${rootDir}/keystore/myx.jks"
+                  storeFile file(keystorePath)
+                  storePassword System.getenv("KEYSTORE_PASSWORD") ?: ""
+                  keyAlias System.getenv("KEY_ALIAS") ?: ""
+                  keyPassword System.getenv("KEY_PASSWORD") ?: ""
+              }
+          }'''
+          if pattern.search(s):
+              s = pattern.sub(new_block, s, count=1)
+              proj.write_text(s)
+              print("✅ signingConfigs dipatch ke env KEYSTORE_FILE")
+          else:
+              print("⚠️ Tidak menemukan blok signingConfigs, cek manual")
+          PY
 
       # ─────────────────────────────────────────────
-      # 8. Build DEBUG (selalu)
+      # 9. Build DEBUG (selalu)
       # ─────────────────────────────────────────────
       - name: Build Debug APK
         working-directory: ${{ steps.detect.outputs.PROJECT_DIR }}
@@ -130,13 +230,13 @@ jobs:
           if [ -f gradlew ]; then chmod +x gradlew; ./gradlew --no-daemon assembleDebug; else gradle --no-daemon assembleDebug; fi
 
       # ─────────────────────────────────────────────
-      # 9. Build RELEASE (kalau keystore ada)
+      # 10. Build RELEASE (hanya kalau keystore ada)
       # ─────────────────────────────────────────────
       - name: Build Release APK
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
+        if: ${{ steps.keystore.outputs.HAS_KEYSTORE == 'true' }}
         working-directory: ${{ steps.detect.outputs.PROJECT_DIR }}
         env:
-          KEYSTORE_FILE: ${{ github.workspace }}/keystore/myx.jks
+          KEYSTORE_FILE: ${{ steps.keystore.outputs.KEYSTORE_PATH }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
@@ -144,7 +244,7 @@ jobs:
           if [ -f gradlew ]; then ./gradlew --no-daemon assembleRelease; else gradle --no-daemon assembleRelease; fi
 
       # ─────────────────────────────────────────────
-      # 10. Upload Artifact DEBUG
+      # 11. Upload Artifact DEBUG (selalu)
       # ─────────────────────────────────────────────
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
@@ -152,22 +252,22 @@ jobs:
           name: FastChargePro-Debug
           path: ${{ steps.detect.outputs.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-          retention-days: 30   # ← BISA DIUBAH: 1–90 (public) / 1–400 (private)
+          retention-days: 30
 
       # ─────────────────────────────────────────────
-      # 11. Upload Artifact RELEASE (kalau ada)
+      # 12. Upload Artifact RELEASE (kalau keystore ada)
       # ─────────────────────────────────────────────
       - name: Upload Release APK
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
+        if: ${{ steps.keystore.outputs.HAS_KEYSTORE == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: FastChargePro-Release
           path: ${{ steps.detect.outputs.PROJECT_DIR }}/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
-          retention-days: 30   # ← BISA DIUBAH sesuai kebutuhan
+          retention-days: 30
 
       # ─────────────────────────────────────────────
-      # 12. REGISTRASI SERI HP (cek tanpa API dulu)
+      # 13. REGISTRASI SERI HP (cek tanpa API dulu)
       # ─────────────────────────────────────────────
       - name: Register device serial (no API first, then API)
         if: ${{ github.event.inputs.device_serial != '' || github.event.client_payload.device_serial != '' }}
@@ -180,8 +280,6 @@ jobs:
           echo "📱 Serial yang dikirim: $SERIAL"
           SERIAL_FILE="device_serials.json"
 
-          # ── LANGKAH A: CEK TANPA API (baca file dari repo) ──
-          # File diambil dari checkout (langkah 1), bukan API
           if [ -f "$SERIAL_FILE" ]; then
             echo "📂 File $SERIAL_FILE ditemukan, membaca..."
             EXISTING=$(cat "$SERIAL_FILE")
@@ -190,7 +288,6 @@ jobs:
             EXISTING='{"serials":[]}'
           fi
 
-          # Cek duplikat: kalau serial sudah ada, keluar tanpa API
           if echo "$EXISTING" | grep -q "\"$SERIAL\""; then
             echo "✅ Serial $SERIAL SUDAH TERDAFTAR. Tidak ada perubahan."
             exit 0
@@ -198,8 +295,6 @@ jobs:
 
           echo "🆕 Serial $SERIAL belum ada. Lanjut ke API..."
 
-          # ── LANGKAH B: PAKAI API UNTUK UPDATE FILE ──
-          # Ambil SHA file saat ini (wajib untuk update via API)
           if [ -f "$SERIAL_FILE" ]; then
             SHA=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
               "https://api.github.com/repos/$REPO/contents/$SERIAL_FILE" \
@@ -208,7 +303,6 @@ jobs:
             SHA=""
           fi
 
-          # Tambah serial baru ke JSON (tanpa duplikat)
           NEW_JSON=$(python3 - <<PY
           import json
           data = json.loads('''$EXISTING''')
@@ -219,19 +313,15 @@ jobs:
           PY
           )
 
-          # Encode base64 untuk API
           ENCODED=$(echo "$NEW_JSON" | base64 -w0)
 
-          # Kirim PUT ke GitHub API
           if [ -n "$SHA" ]; then
-            # Update file yang sudah ada
             curl -s -X PUT \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/$REPO/contents/$SERIAL_FILE" \
               -d "{\"message\":\"register device: $SERIAL\",\"content\":\"$ENCODED\",\"sha\":\"$SHA\"}"
           else
-            # Buat file baru
             curl -s -X PUT \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
@@ -242,10 +332,10 @@ jobs:
           echo "✅ Serial $SERIAL berhasil didaftarkan via API."
 
       # ─────────────────────────────────────────────
-      # 13. Auto-release kalau push tag v*
+      # 14. Auto-release kalau push tag v* DAN keystore ada
       # ─────────────────────────────────────────────
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v') && secrets.KEYSTORE_BASE64 != ''
+        if: startsWith(github.ref, 'refs/tags/v') && steps.keystore.outputs.HAS_KEYSTORE == 'true'
         uses: softprops/action-gh-release@v1
         with:
           files: ${{ steps.detect.outputs.PROJECT_DIR }}/app/build/outputs/apk/release/app-release.apk
