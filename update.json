@@ -1,7 +1,7 @@
 {
   "versionCode": 3,
   "versionName": "2.1",
-  "apkUrl": "https://github.com/FelixParadox/FastChargeMonitor/releases/download/v1.1/app-release.apk",
+  "apkUrl": "https://github.com/FelixParadox/FastChargeMonitor/raw/refs/heads/main/app-release.apk",
   "changelog": "✨ Fitur baru:\n- Grafik lebih smooth\n- Fix bug ETA\n- UI improved\n- Battery drain fix",
   "forceUpdate": false
 }
